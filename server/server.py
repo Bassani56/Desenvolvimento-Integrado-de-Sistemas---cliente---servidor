@@ -261,7 +261,7 @@ def run_worker(worker, server_data, request_data):
     started_at = datetime.fromtimestamp(initial_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     ended_at = datetime.fromtimestamp(final_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-     # Save image
+    # Save image
     metadata = {
         'Title': filename.replace(".png", ""),
         'Author': f"CGNR Processor",
@@ -291,42 +291,32 @@ def handle_client(client, addr, request_queue):
     print(f"[NOVA CONEXÃO] {addr} conectado")
 
     connected = True
-    recebendo = False
     buffer = b''
     username = None
 
     while connected:
         try:
-            chunk = client.recv(100000)
+            chunk = client.recv(1000000)
             if not chunk:
                 break
 
             if chunk.startswith(b'EXIT'):
                 connected = False
 
-            if recebendo:
-                buffer += chunk
-
-                if b'fim' in buffer:
-                    json_bytes, _, buffer = buffer.partition(b'fim')
-                    data = json.loads(json_bytes.decode())
-                    signal = np.array(data['signal'], np.float32).reshape((-1, 1))
-
-                    request_data = RequestData(username, data['algorithm'], data['model'], signal)
-                    request_queue.put(request_data)
-
-                    recebendo = False  # pronto para próxima mensagem
-                    buffer = b''
-
-                    create_image(username)
-                    continue
-
             if chunk.startswith(b'1_|'):
                 parts = chunk.decode().split('|', 2)
                 username = parts[1]
-                # buffer = parts[2].encode()  # início do JSON
-                recebendo = True
+                json_bytes = parts[2].encode()  # início do JSON
+                
+                data = json.loads(json_bytes.decode())
+                signal = np.array(data['signal'], np.float32).reshape((-1, 1))
 
+                request_data = RequestData(username, data['algorithm'], data['model'], signal)
+                request_queue.put(request_data)
+
+                create_image(username)
+ 
+ 
             elif chunk.startswith(b'2_'):
                 parts = chunk.decode().split(':')
                 username = parts[1]

@@ -12,6 +12,13 @@ import random
 import base64
 import json
 
+import json
+import os
+
+base = os.path.dirname(os.path.abspath(__file__))
+path_json = r"C:\Users\User\Desktop\Desenvolvimento Integrado\cliente-servidor\server\sorteio.json"
+
+
 
 ACTUAL_DIR = Path(os.path.dirname(os.path.abspath(sys.argv[0])))
 
@@ -40,23 +47,61 @@ def save_image(filepath, b64_content):
     with open(filepath, 'wb') as file:
         file.write(base64.b64decode(b64_content))
 
-def envia_requisicao(client, username, data, chunk_size=1024):
+def envia_requisicao(client, username, data):
     # converte dict em string JSON
     json_str = json.dumps(data)
-    tamanho = len(json_str)
-    x = 0
 
     # envia mensagem inicial com username
-    client.send(f'1_|{username}|'.encode())
+    client.send(f'1_|{username}|{json_str}'.encode())
 
-    # envia o JSON em pedaços
-    while x < tamanho:
-        chunk = json_str[x:x+chunk_size]  # pega um pedaço de tamanho chunk_size
-        client.send(chunk.encode())
-        x += chunk_size
 
-    # opcional: envia um delimitador para indicar fim da mensagem
-    client.send(b'fim')
+def sorteio():
+    with open(path_json, "r") as f:
+        data = json.load(f)
+
+    # Garantir que são listas (caso o JSON inicial esteja vazio)
+    if "time_to_next_request" not in data:
+        data["time_to_next_request"] = []
+    if "algorithm" not in data:
+        data["algorithm"] = []
+    if "model" not in data:
+        data["model"] = []
+    if "n_model" not in data:
+        data["n_model"] = []
+
+    # Gerar valores aleatórios desta iteração
+    time_to_next_request = random.randint(1, 5)
+    algorithm = random.choice(["cgne", "cgnr"])
+    model = random.choice(["30x30", "60x60"])
+    n_model = random.randint(0, 2)
+
+    # Adicionar os valores nas listas
+    data["time_to_next_request"].append(time_to_next_request)
+    data["algorithm"].append(algorithm)
+    data["model"].append(model)
+    data["n_model"].append(n_model)
+
+    # Salvar tudo
+    with open(path_json, "w") as f:
+        json.dump(data, f, indent=4)
+
+    # Retornar só os valores gerados nesta chamada
+    return time_to_next_request, algorithm, model, n_model
+
+def first():
+    # Carregar o que já existe
+    with open(path_json, "r") as f:
+        data = json.load(f)
+
+    # Sortear e atualizar
+    rand_request = random.randint(3, 7)
+    data['rand_request'] = rand_request
+
+    # salvar SEM apagar as listas existentes
+    with open(path_json, "w") as f:  
+        json.dump(data, f, indent=4)
+
+    return rand_request
 
 
 def sendMessages(client, username, stop_event):
@@ -74,17 +119,14 @@ def sendMessages(client, username, stop_event):
 
             if msg == 1:
                 # client.send(f'<{username}> {msg}'.encode())
-                rand_request = random.randint(3, 7)
+                rand_request = first()
 
                 for i in range(rand_request):
                     print(f"executando a {i + 1}° requisição, no total de {rand_request}")
 
-                    # rand_value = random.randint(1, 1)
-                    time_to_next_request = random.randint(1, 5)
-
-                    algorithm = random.choice(["cgne", "cgnr"])
-                    model = random.choice(["30x30", "60x60"])
-                    g = read_signal(model, random.randint(0, 2))
+                    time_to_next_request, algorithm, model, n_model = sorteio()
+                    
+                    g = read_signal(model, n_model)
                     data = {'algorithm': algorithm, 'model': model, 'signal': g}
 
 

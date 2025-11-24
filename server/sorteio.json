@@ -1,0 +1,31 @@
+{
+    "rand_request": 5,
+    "time_to_next_request": [
+        4,
+        5,
+        2,
+        2,
+        1
+    ],
+    "algorithm": [
+        "cgnr",
+        "cgnr",
+        "cgne",
+        "cgne",
+        "cgnr"
+    ],
+    "model": [
+        "60x60",
+        "30x30",
+        "60x60",
+        "60x60",
+        "60x60"
+    ],
+    "n_model": [
+        1,
+        1,
+        2,
+        0,
+        0
+    ]
+}
