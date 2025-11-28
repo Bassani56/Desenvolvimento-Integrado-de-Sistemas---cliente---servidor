@@ -291,6 +291,7 @@ def process_job(data):
     start_time = time()
     start_dt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+    #carrega os dados
     H_matrix = np.loadtxt(model, delimiter=',', dtype=np.float32)
     signal_path = os.path.join("..", signal + ".csv")
     g_vector = np.loadtxt(signal_path, delimiter=",", dtype=np.float32)
@@ -307,16 +308,19 @@ def process_job(data):
     f = f.flatten()
     f_min, f_max = f.min(), f.max()
 
+    #se forem iguais converte tudo para cinza
     if f_max != f_min:
         f_norm = (f - f_min) / (f_max - f_min) * 255
     else:
         f_norm = np.full_like(f, 128)
 
+    #converte o vetor para imagem quadrada
     lado = int(np.sqrt(len(f_norm)))
     imagem_array = f_norm[:lado*lado].reshape((lado, lado), order='F')
     imagem_array = np.clip(imagem_array, 0, 255)
     imagem = Image.fromarray(imagem_array.astype('uint8'))
 
+    #converte para bytes (PNG)
     img_bytes = io.BytesIO()
     imagem.save(img_bytes, format='PNG')
     img_bytes.seek(0)
@@ -340,7 +344,7 @@ def process_job(data):
         "iters": iters,
         "time": end_time - start_time,
     }
-# data | Imagem: worker username_algoritmo.csv_modelo_N.csv.png | Usuario: username | Algoritmo: CGNE | Inicio: 2025-07-08 21:41:33 | Fim: 2025-07-08 21:41:35 | Tamanho: 30x30 | Iteracoes: 5
+
     # CORREÇÃO: usar bytes_img
     img_b64 = base64.b64encode(bytes_img).decode()
 
