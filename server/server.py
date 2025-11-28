@@ -16,8 +16,18 @@ import psutil
 import base64
 import matplotlib.pyplot as plt
 import json
+import random
+from PIL import Image
+import gc
+import io
 
-# Configurações
+file_lock = Lock()       # para logs / csv
+send_lock = Lock()       # para enviar mensagens no socket
+print_lock = Lock()      # opcional: evita prints embaralhados
+
+
+ACTUAL_DIR = Path(os.path.dirname(os.path.abspath(sys.argv[0])))
+
 MIN_ERROR = .0001
 MAX_WORKERS = 8
 
@@ -25,8 +35,6 @@ MODEL_SHAPES = {
     '30x30': (27904, 900),
     '60x60': (50816, 3600)
 }
-
-ACTUAL_DIR = Path(os.path.dirname(os.path.abspath(sys.argv[0])))
 
 IMAGE_SHAPES = {
     '30x30': (900, 1),
@@ -37,107 +45,123 @@ FINAL_IMAGE_SHAPE = {
     '30x30': (30, 30),
     '60x60': (60, 60)
 }
+def reconstruct_cgnr(H: np.ndarray, g: np.ndarray, max_iterations: int, tol=5e-3, min_iterations=10, lambda_reg: float = 0.0, logger=None) -> tuple:
+    m, n = H.shape
+    f = np.zeros((n, 1))
+    g = g.reshape(-1, 1)
+    r = g - H @ f
+    z = H.T @ r
+    p = z.copy()
+    initial_residual_norm = np.linalg.norm(r)
+    min_div = 1e-12
+    number_iterations = 0
 
-def sgemm(alpha, a, b, trans_a=False):
-    if trans_a:
-        a = a.T
-    return alpha * np.dot(a, b)
+    if logger is not None:
+        logger.info(f"CGNR: tol={tol:.3e}")
 
-def calc_error(b, a):
-    return norm(b, 2) - norm(a, 2)
+    for i in range(max_iterations):
+        w = H @ p
 
-def cgne(h, g, image_shape, final_image_shape):
-    f0 = np.zeros(image_shape, np.float32)
-    r0 = g - sgemm(1.0, h, f0)
-    p0 = sgemm(1.0, h, r0, trans_a=True)
+        # >>> Correção dos warnings
+        z_dot = (z.T @ z).item()
+        w_dot = (w.T @ w).item() + min_div
+        # <<<
 
-    total_iterations = 0
+        alpha = z_dot / w_dot
 
-    while total_iterations < 30:
-        total_iterations += 1
+        f_new = f + alpha * p
+        r_new = r - alpha * w
+        z_new = H.T @ r_new
 
-        a0 = sgemm(1.0, r0, r0, trans_a=True) / sgemm(1.0, p0, p0, trans_a=True)
-        f0 = f0 + a0 * p0
-        r1 = r0 - a0 * sgemm(1.0, h, p0)
+        # >>> Correção dos warnings
+        z_new_dot = (z_new.T @ z_new).item()
+        # <<<
 
-        error = calc_error(r1, r0)
-        if error < MIN_ERROR:
+        beta = z_new_dot / (z_dot + min_div)
+        p_new = z_new + beta * p
+
+        current_residual_norm = np.linalg.norm(r_new)
+        relative_error = current_residual_norm / (initial_residual_norm + min_div)
+
+        if logger is not None:
+            logger.info(
+                f"Iteracao {i + 1}: erro relativo = {relative_error:.6e}, residuo = {current_residual_norm:.3e}"
+            )
+
+        f, r, z, p = f_new, r_new, z_new, p_new
+        number_iterations = i + 1
+
+        if number_iterations >= min_iterations and relative_error < tol:
+            if logger is not None:
+                logger.info(f"Convergiu com erro relativo {relative_error:.2e} < {tol:.2e}")
             break
 
-        beta = sgemm(1.0, r1, r1, trans_a=True) / sgemm(1.0, r0, r0, trans_a=True)
-        p0 = sgemm(1.0, h, r0, trans_a=True) + beta * p0
-        r0 = r1
+    final_residual = g - H @ f
+    final_error = np.linalg.norm(final_residual) / (np.linalg.norm(g) + min_div)
+    return f.flatten(), number_iterations, final_error
 
-    f0 = f0.reshape(final_image_shape)
-    return f0, total_iterations
+def reconstruct_cgne(H: np.ndarray, g: np.ndarray, max_iterations: int, tol=1e-6, min_iterations=10, reg_factor: float = 0.0, logger=None) -> tuple[np.ndarray, int, float]:
+    N = H.shape[1]
+    f = np.zeros((N, 1))
+    g = g.reshape(-1, 1)
+    r = g - H @ f
+    p = H.T @ r
+    initial_residual_norm = np.linalg.norm(r)
+    min_div = 1e-12
+    final_iterations = 0
 
-def cgnr(h, g, image_shape, reshaped_image_shape):
-    f0 = np.zeros(image_shape, np.float32)
-    r0 = g - sgemm(1.0, h, f0)
-    z0 = sgemm(1.0, h, r0, trans_a=True)
-    p0 = np.copy(z0)
+    if logger is not None:
+        logger.info(f"CGNE: tol={tol:.3e}")
 
-    total_iterations = 0
-    while total_iterations < 30:
-        # Count iterations
-        total_iterations += 1
+    for i in range(max_iterations):
+        Hp = H @ p
 
-        w = sgemm(1.0, h, p0)
-        norm_z = norm(z0, 2) ** 2
-        a = norm_z / norm(w) ** 2
-        f0 = f0 + a * p0
-        r1 = r0 - a * w
+        # >>> Correções dos warnings
+        alpha_num = (r.T @ r).item()
+        alpha_den = (Hp.T @ Hp).item() + min_div
+        # <<<
 
-        error = abs(calc_error(r1, r0))
-        if error < MIN_ERROR:
+        if alpha_den < min_div:
             break
 
-        z0 = sgemm(1.0, h, r1, trans_a=True)
-        b = norm(z0, 2) ** 2 / norm_z
-        p0 = z0 + b * p0
-        r0 = r1
+        alpha = alpha_num / alpha_den
+        f_new = f + alpha * p
+        r_new = r - alpha * (H @ p)
 
-    f0 = f0.reshape(reshaped_image_shape)
+        # >>> Correções dos warnings
+        beta_num = (r_new.T @ r_new).item()
+        beta_den = (r.T @ r).item() + min_div
+        # <<<
 
-    return f0, total_iterations
+        beta = beta_num / beta_den
+        p_new = H.T @ r_new + beta * p
 
-def create_image(username):
+        current_residual_norm = np.linalg.norm(r_new)
+        relative_error = current_residual_norm / (initial_residual_norm + min_div)
+
+        if logger is not None:
+            logger.info(f"Iteracao {i + 1}: erro relativo = {relative_error:.6e}")
+
+        f, r, p = f_new, r_new, p_new
+        final_iterations = i + 1
+
+        if final_iterations >= min_iterations and relative_error < tol:
+            if logger is not None:
+                logger.info(f"Convergiu com erro relativo {relative_error:.2e} < {tol:.2e}")
+            break
+
+    final_error = np.linalg.norm(g - H @ f) / (np.linalg.norm(g) + min_div)
+    return f.flatten(), final_iterations, final_error
+
+def create_pasta(username):
     path = ACTUAL_DIR / "images" / username    
     if not path.exists():
         os.mkdir(path)
 
-def read_model(model):
-    with open(ACTUAL_DIR / "models" / f"model-{model}.csv", "r") as file:
-        reader = csv.reader(file, delimiter=',')
-        res = np.empty(MODEL_SHAPES[model], dtype=np.float32)
-        for i, line in enumerate(reader):
-            res[i] = np.array(line, np.float32)
-        return res
-    
-clients = []
-images_64 = {}
-
 ALGORITHM = {
-    'cgne': cgne,
-    'cgnr': cgnr
+    'cgne': reconstruct_cgne,
+    'cgnr': reconstruct_cgnr
 }
-
-def read_and_code(file_path, filename):
-    with open(file_path, 'rb') as f:
-        converted = base64.b64encode(f.read()).decode('utf-8')
-        images_64[filename] = converted
-
-def bytes_to_mb(value_bytes):
-    return value_bytes / (1024 ** 2)
-
-def get_resource_usage():
-    process = psutil.Process(os.getpid())
-    cpu = process.cpu_percent(interval=None)
-    mem = bytes_to_mb(process.memory_info().rss)
-
-    # cpu = bytes_to_gigas(psutil.virtual_memory().used)
-    # mem = psutil.virtual_memory().percent
-    return cpu, mem
 
 class CSV:
     def __init__(self, filename):
@@ -159,179 +183,301 @@ class CSV:
         with self.__lock:
             self.__file.flush()
 
-    def close(self):
-        if self.__file.closed:
-            return
-                    
-        self.__file.close()
-
 class Relatorio:
     def __init__(self):
         curr_time = time()
         self.images = CSV(ACTUAL_DIR / "relatorio" / f"imagens-relatorio_{curr_time}.csv")
         self.performance = CSV(ACTUAL_DIR / "relatorio" / f"performance-relatorio_{curr_time}.csv")
 
-        self.images.write(["Username", "Image name", "Algorithm", "Model type", "Iterations", "Reconstruction time"])
-        self.performance.write(["Measured at", "CPU usage", "Memory usage"])
-
-    def close(self):
-        self.images.close()
-        self.performance.close()
-
-class Worker:
-    def __init__(self, id, queue):
-        self.id = id
-        self.queue = queue
+        self.images.write(["Username   ", "Image name   ", "Algorithm   ", "Model type   ", "Iterations   ", "Reconstruction time   "])
+        self.performance.write(["Measured at   ", "CPU usage   ", "Memory usage"])
 
 class ServerData:
     def __init__(self, reports, models):
         self.reports = reports
         self.models = models
 
-class RequestData:
-    def __init__(self, username, algorithm, model, signal):
-        self.username = username
-        self.algorithm = algorithm
-        self.model = model
-        self.signal = signal
+def apply_signal_gain(g_vector: np.ndarray):
+    S = len(g_vector); g_out = g_vector.copy().astype(np.float32)
+    for l in range(S): g_out[l] *= (100.0 + (1.0/20.0)*(l+1)*np.sqrt(l+1))
+    return g_out
 
-def run_profiler(close_profiler_worker, server_data):
-    # "aquecimento" inicial do cpu_percent
-    process = psutil.Process(os.getpid())
-    process.cpu_percent(None)
-    sleep(0.1)
+def get_dynamic_mem_limit():
+    # Limite: 80% da RAM total, mas sempre deixa pelo menos 1GB livre
+    mem = psutil.virtual_memory()
+    total_gb = mem.total / (1024**3)
+    if total_gb <= 2:
+        return 35.0   # Em PCs com pouca RAM, seja mais conservador
+    # 80% do total, mas nunca usar mais que total-1GB
+    # max_percent = 100.0 - (1.0 / total_gb) * 100.0
+    # max_percent = 100 - (1/16) * 100 = 93.75%
 
+    return min(42.0, 44.0)
+    
+def get_dynamic_cpu_limit():
+    # Limite: 80% dos núcleos lógicos
+    n_cores = psutil.cpu_count(logical=True)
+    # return max(50.0, min(90.0, n_cores * 80.0 / n_cores))  # 80% (ajustável)
+    return 50
+def get_percent_virtual_memory(close_profiler_worker, server_data):
     while not close_profiler_worker.value:
-        start = time()
+        start_dt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        measured_at = datetime.fromtimestamp(start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        cpu_percent = psutil.cpu_percent(interval=0.5)
 
-        # mede uso de CPU desde a última chamada
-        cpu, mem = get_resource_usage()
+        mem = psutil.virtual_memory()
+        mem_percent = mem.percent
        
-        server_data.reports.performance.write([measured_at, f"{cpu}%", f"{mem: .2f} MB"])
+        server_data.reports.performance.write([start_dt, f"    {cpu_percent}%", f"    {mem_percent} %"])
         server_data.reports.performance.flush()
 
-        # espera até completar 1 segundo total de loop
-        elapsed = time() - start
-        if elapsed < 1:
-            sleep(1 - elapsed)
+        sleep(0.5)
 
-def run_queue_worker(request_queue, server_data):
-    worker_queue = Queue(MAX_WORKERS)
-    for i in range(MAX_WORKERS):
-        worker_queue.put(i)
-
+def run_queue_worker(request_queue):
     while True:
-        worker_id = worker_queue.get()
-        worker = Worker(worker_id, worker_queue)  # item, fila
+        # checar limites
+        cpu_limit = get_dynamic_cpu_limit()
+        mem_limit = get_dynamic_mem_limit()
 
-        request_data = request_queue.get()
+        cpu_percent = psutil.cpu_percent(interval=0.5)
+        mem_percent = psutil.virtual_memory().percent
 
-        worker_thread = Thread(target=run_worker, args=[ worker, server_data, request_data])
-        worker_thread.start()
+        data = request_queue.get()   # pega o item da fila
+        if data is None:
+            break  # comando de shutdown
+
+        username = data["username"]
+        idx = data["idx"]
+
+        # respeitar tempo mínimo para retry
+        now = time()
+        next_try = data.get("next_try", 0)
+        if now < next_try:
+            request_queue.put(data)
+            sleep(0.5)
+            continue
 
 
-def run_worker(worker, server_data, request_data):
-    print(f"[worker-{worker.id}] Started")
+        print(f"[WORKER] CPU={cpu_percent:.1f}% (lim={cpu_limit}%) | "
+              f"RAM={mem_percent:.1f}% (lim={mem_limit}%)")
 
-    username = request_data.username
-    model_type = request_data.model
-    signal = request_data.signal
+        if cpu_percent > cpu_limit or mem_percent > mem_limit:
+            print(f"[WORKER] Recursos altos — requeue >> {username} idx={idx}")
 
-    model = server_data.models[model_type]
-    
-    image_shape = IMAGE_SHAPES[model_type]
-    reshaped_image_shape = FINAL_IMAGE_SHAPE[model_type]
+            retry = data.get("retry", 0)
+            retry = min(retry + 1, 5)
+            data["retry"] = retry
+            data["next_try"] = time() + (2 ** retry)  # backoff
 
-    initial_time = time()
+            print(f"[WORKER]: tempo de espera ")
 
-    img, iterations = ALGORITHM[request_data.algorithm](
-        model,
-        signal,
-        image_shape,
-        reshaped_image_shape
-    )
+            request_queue.put(data)
+            continue
 
-    final_time = time()
-    elapsed_time = final_time - initial_time
+        print(f"[WORKER] Processando >> {username} idx={idx}")
+        process_job(data)
 
-    filename = f"{username}-final-{final_time}.png"
-    filepath = ACTUAL_DIR / "images" / username / filename
-    started_at = datetime.fromtimestamp(initial_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    ended_at = datetime.fromtimestamp(final_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        # reset do retry para próximos jobs sucessivos
+        data["retry"] = 0
 
-    # Save image
-    metadata = {
-        'Title': filename.replace(".png", ""),
-        'Author': f"CGNR Processor",
-        'Description': f"Username: {username} | Algorithm: {request_data.algorithm.upper()} | Started at: {started_at} | Ended at: {ended_at} | "
-                       f"Size: {FINAL_IMAGE_SHAPE[model_type]} | Iterations: {iterations}"
+def process_job(data):
+    username = data["username"]
+    algorithm = data["algorithm"]
+    model = data["model"]
+    signal = data["signal"]
+    idx = data["idx"]
+    client = data["client"]
+
+    start_time = time()
+    start_dt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    H_matrix = np.loadtxt(model, delimiter=',', dtype=np.float32)
+    signal_path = os.path.join("..", signal + ".csv")
+    g_vector = np.loadtxt(signal_path, delimiter=",", dtype=np.float32)
+
+    g_processed = apply_signal_gain(g_vector)
+
+    tol_requisito = 1e-4
+
+    if algorithm.upper() == 'CGNR':
+        f, iters, final_error = reconstruct_cgnr(H_matrix, g_processed, 5, tol=tol_requisito)
+    elif algorithm.upper() == 'CGNE':
+        f, iters, final_error = reconstruct_cgne(H_matrix, g_processed, 5, tol=tol_requisito)
+
+    f = f.flatten()
+    f_min, f_max = f.min(), f.max()
+
+    if f_max != f_min:
+        f_norm = (f - f_min) / (f_max - f_min) * 255
+    else:
+        f_norm = np.full_like(f, 128)
+
+    lado = int(np.sqrt(len(f_norm)))
+    imagem_array = f_norm[:lado*lado].reshape((lado, lado), order='F')
+    imagem_array = np.clip(imagem_array, 0, 255)
+    imagem = Image.fromarray(imagem_array.astype('uint8'))
+
+    img_bytes = io.BytesIO()
+    imagem.save(img_bytes, format='PNG')
+    img_bytes.seek(0)
+    bytes_img = img_bytes.getvalue()
+
+    end_time = time()
+    end_dt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    del H_matrix, g_vector, g_processed, f, f_norm, imagem_array, imagem
+    # gc.collect()
+
+    data_info = {
+        "username": username,
+        "index": idx,
+        "algorithm": algorithm,
+        "model": model,
+        "signal": signal,
+        "start_dt": start_dt,
+        "end_dt": end_dt,
+        "size": f"{lado}x{lado}",
+        "iters": iters,
+        "time": end_time - start_time,
     }
-    plt.imsave(filepath, img, cmap='gray', metadata=metadata)
+# data | Imagem: worker username_algoritmo.csv_modelo_N.csv.png | Usuario: username | Algoritmo: CGNE | Inicio: 2025-07-08 21:41:33 | Fim: 2025-07-08 21:41:35 | Tamanho: 30x30 | Iteracoes: 5
+    # CORREÇÃO: usar bytes_img
+    img_b64 = base64.b64encode(bytes_img).decode()
 
-    # Save to images report
-    server_data.reports.images.write([
-        username,
-        filename,
-        request_data.algorithm.upper(),
-        model_type,
-        iterations,
-        elapsed_time
-    ])
-    server_data.reports.images.flush()
+    mensagem = {
+        "type": "2_",
+        "payload": {
+            "header": data_info,   # CORREÇÃO: enviar o header certo
+            "image": img_b64
+        }
+    }
 
-    read_and_code(filepath, filename)
-
-    print(f"[worker-{worker.id}] Executed in {elapsed_time}s")
-
-    worker.queue.put(worker.id)
+    # enviar mensagem *com quebra de linha*
+    client.send((json.dumps(mensagem) + "\n").encode())
+    print(f"[FINALIZADO] Process → {username}  idx -> {idx}")
 
 def handle_client(client, addr, request_queue):
     print(f"[NOVA CONEXÃO] {addr} conectado")
 
     connected = True
-    buffer = b''
     username = None
 
     while connected:
         try:
-            chunk = client.recv(1000000)
-            if not chunk:
+            data = client.recv(1000000)
+            if not data:
                 break
 
-            if chunk.startswith(b'EXIT'):
+            if data.startswith(b'EXIT'):
                 connected = False
 
-            if chunk.startswith(b'1_|'):
-                parts = chunk.decode().split('|', 2)
+            elif data.startswith(b'2_'):
+                parts = data.decode().split('|', 2)
                 username = parts[1]
-                json_bytes = parts[2].encode()  # início do JSON
+                json_bytes = parts[2].encode()
                 
-                data = json.loads(json_bytes.decode())
-                signal = np.array(data['signal'], np.float32).reshape((-1, 1))
+                data_list = json.loads(json_bytes)
 
-                request_data = RequestData(username, data['algorithm'], data['model'], signal)
-                request_queue.put(request_data)
+                for idx, item in enumerate(data_list):
+                    cpu_limit = get_dynamic_cpu_limit()
+                    mem_limit = get_dynamic_mem_limit()
+                    cpu_percent = psutil.cpu_percent(interval=0.5)
+                    mem_percent = psutil.virtual_memory().percent
 
-                create_image(username)
- 
- 
-            elif chunk.startswith(b'2_'):
-                parts = chunk.decode().split(':')
-                username = parts[1]
+                    print(f"username:: {username}    CPU agora = {cpu_percent:.1f}% (limite={cpu_limit}%)  |  "
+                    f"RAM agora = {mem_percent:.1f}% (limite={mem_limit}%)")
 
-                # converte os bytes para strings
-                dict_user = {key: value for key, value in images_64.items() if username in key}
 
-                # envia um JSON completo
-                message = {
-                    "type": "2_",
-                    "username": username,
-                    "payload": dict_user
-                }
+                    if cpu_percent > cpu_limit or mem_percent > mem_limit:
+                        print('PAUSA::: ', username, 'idx:: ', idx)
+                        algorithm = item['algorithm']
+                        model = item['model']
+                        signal = item['signal']
 
-                client.send(json.dumps(message).encode())
+                        data = {
+                            "algorithm": algorithm,
+                            "model": model,
+                            "signal": signal,
+                            "username": username,
+                            "idx": idx,
+                            "client": client
+                        }
+
+                        request_queue.put(data)
+                        continue  
+                    else:
+                        algorithm = item['algorithm']
+            
+                        model = item['model']
+                    
+                        signal = item['signal']
+            
+                        start_time = time()
+                        start_dt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+                        H_matrix = np.loadtxt(model, delimiter=',', dtype=np.float32)
+                        signal_path = os.path.join("..", signal + ".csv")
+                        g_vector = np.loadtxt(signal_path, delimiter=",", dtype=np.float32)
+
+                        g_processed = apply_signal_gain(g_vector)
+
+                        tol_requisito = 1e-4
+
+                        if algorithm.upper() == 'CGNR':
+                            f, iters, final_error = reconstruct_cgnr(H_matrix, g_processed, 5, tol=tol_requisito)
+                        elif algorithm.upper() == 'CGNE':
+                            f, iters, final_error = reconstruct_cgne(H_matrix, g_processed, 5, tol=tol_requisito)
+
+                        f = f.flatten()
+                        f_min, f_max = f.min(), f.max()
+
+                        if f_max != f_min:
+                            f_norm = (f - f_min) / (f_max - f_min) * 255
+                        else:
+                            f_norm = np.full_like(f, 128)
+
+                        lado = int(np.sqrt(len(f_norm)))
+                        imagem_array = f_norm[:lado*lado].reshape((lado, lado), order='F')
+                        imagem_array = np.clip(imagem_array, 0, 255)
+                        imagem = Image.fromarray(imagem_array.astype('uint8'))
+
+                        img_bytes = io.BytesIO()
+                        imagem.save(img_bytes, format='PNG')
+                        img_bytes.seek(0)
+                        bytes_img = img_bytes.getvalue()
+
+                        end_time = time()
+                        end_dt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+                        del H_matrix, g_vector, g_processed, f, f_norm, imagem_array, imagem
+                        gc.collect()
+
+                        data_info = {
+                            "username": username,
+                            "index": idx,
+                            "algorithm": algorithm,
+                            "model": model,
+                            "signal": signal,
+                            "start_dt": start_dt,
+                            "end_dt": end_dt,
+                            "size": f"{lado}x{lado}",
+                            "iters": iters,
+                            "time": end_time - start_time,
+                        }
+
+                        # CORREÇÃO: usar bytes_img
+                        img_b64 = base64.b64encode(bytes_img).decode()
+
+                        mensagem = {
+                            "type": "2_",
+                            "payload": {
+                                "header": data_info,   # CORREÇÃO: enviar o header certo
+                                "image": img_b64
+                            }
+                        }
+
+                        with send_lock:
+                            client.send((json.dumps(mensagem) + "\n").encode())
 
         except ConnectionResetError:
             print(f"[DESCONECTADO] {addr} encerrou a conexão.")
@@ -340,8 +486,6 @@ def handle_client(client, addr, request_queue):
     client.close()
 
 def main():
-    global clients
-
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         server.bind(('localhost', 7776))
@@ -352,28 +496,21 @@ def main():
         return
 
 
-    models = {
-        "30x30": read_model("30x30"),
-        "60x60": read_model("60x60")
-    }
-
     request_queue = Queue()
     close_profiler_worker = Value(c_bool)
 
     reports = Relatorio()
-    server_data = ServerData(reports, models)
+    server_data = ServerData(reports, None)
 
-    profiler_worker = Thread(target=run_profiler, args=[close_profiler_worker, server_data])
+    profiler_worker = Thread(target=get_percent_virtual_memory, args=[close_profiler_worker, server_data])
     profiler_worker.start()
 
     
-    queue_worker = Thread(target=run_queue_worker, args=[ request_queue, server_data])
+    queue_worker = Thread(target=run_queue_worker, args=[ request_queue])
     queue_worker.start()
-
 
     while True:
         client, addr = server.accept()
-        clients.append(client)
         thread = Thread(target=handle_client, args=[client, addr, request_queue])
         thread.start()
 
