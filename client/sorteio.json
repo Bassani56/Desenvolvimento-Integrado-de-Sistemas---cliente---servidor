@@ -1,0 +1,87 @@
+[
+    {
+        "rand_request": 5,
+        "time_to_next_request": [
+            3,
+            1,
+            2,
+            3,
+            3
+        ],
+        "algorithm": [
+            "cgne",
+            "cgne",
+            "cgne",
+            "cgnr",
+            "cgnr"
+        ],
+        "model": [
+            "../server/models/model-60x60.csv",
+            "../server/models/model-30x30.csv",
+            "../server/models/model-30x30.csv",
+            "../server/models/model-30x30.csv",
+            "../server/models/model-30x30.csv"
+        ],
+        "signal": [
+            "client/signals/signal-60x60-2",
+            "client/signals/signal-30x30-1",
+            "client/signals/signal-30x30-1",
+            "client/signals/signal-30x30-1",
+            "client/signals/signal-30x30-0"
+        ]
+    },
+    {
+        "rand_request": 4,
+        "time_to_next_request": [
+            2,
+            4,
+            3,
+            4
+        ],
+        "algorithm": [
+            "cgnr",
+            "cgne",
+            "cgnr",
+            "cgne"
+        ],
+        "model": [
+            "../server/models/model-60x60.csv",
+            "../server/models/model-60x60.csv",
+            "../server/models/model-60x60.csv",
+            "../server/models/model-30x30.csv"
+        ],
+        "signal": [
+            "client/signals/signal-60x60-1",
+            "client/signals/signal-60x60-1",
+            "client/signals/signal-60x60-2",
+            "client/signals/signal-30x30-1"
+        ]
+    },
+    {
+        "rand_request": 4,
+        "time_to_next_request": [
+            2,
+            1,
+            4,
+            1
+        ],
+        "algorithm": [
+            "cgne",
+            "cgnr",
+            "cgnr",
+            "cgnr"
+        ],
+        "model": [
+            "../server/models/model-60x60.csv",
+            "../server/models/model-30x30.csv",
+            "../server/models/model-30x30.csv",
+            "../server/models/model-30x30.csv"
+        ],
+        "signal": [
+            "client/signals/signal-60x60-0",
+            "client/signals/signal-30x30-1",
+            "client/signals/signal-30x30-1",
+            "client/signals/signal-30x30-2"
+        ]
+    }
+]

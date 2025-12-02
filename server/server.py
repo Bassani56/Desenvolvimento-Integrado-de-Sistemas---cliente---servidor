@@ -1,4 +1,4 @@
-from threading import Thread, Lock
+from threading import Thread, Lock, BoundedSemaphore
 import socket
 import os
 import csv
@@ -25,6 +25,8 @@ file_lock = Lock()       # para logs / csv
 send_lock = Lock()       # para enviar mensagens no socket
 print_lock = Lock()      # opcional: evita prints embaralhados
 
+MAX_THREADS = 4   # escolha seu limite
+thread_limiter = BoundedSemaphore(MAX_THREADS)
 
 ACTUAL_DIR = Path(os.path.dirname(os.path.abspath(sys.argv[0])))
 
@@ -234,58 +236,93 @@ def get_percent_virtual_memory(close_profiler_worker, server_data):
         sleep(0.5)
 
 def run_queue_worker(request_queue):
+    print("[SUPERVISOR] Iniciado")
+
     while True:
-        # checar limites
+        data = request_queue.get()   # Bloqueia até existir item
+
+        if data is None:
+            break
+
+        # Extração
+        payload = data["payload"]
+        client = data["client"]
+
+        # Cria thread filha para esse item
+        t = Thread(target=worker_process_item, args=(payload, client))
+        t.daemon = True
+        t.start()
+
+        print(f"[SUPERVISOR] → Job enviado para thread dedicada")
+
+def worker_process_item(payload, client):
+    # limite de threads simultâneas
+    with thread_limiter:
+
+        # (1) medir CPU/MEM
         cpu_limit = get_dynamic_cpu_limit()
         mem_limit = get_dynamic_mem_limit()
 
         cpu_percent = psutil.cpu_percent(interval=0.5)
         mem_percent = psutil.virtual_memory().percent
 
-        data = request_queue.get()   # pega o item da fila
-        if data is None:
-            break  # comando de shutdown
+        model = payload["model"]
+        signal = payload["signal"]
 
-        username = data["username"]
-        idx = data["idx"]
+        historico = []
+        try:
+            with open(r"C:\Users\User\Desktop\Desenvolvimento Integrado\cliente-servidor\teste.json") as f:
+                historico = json.load(f)
+        except:
+            pass
 
-        # respeitar tempo mínimo para retry
-        now = time()
-        next_try = data.get("next_try", 0)
-        if now < next_try:
-            request_queue.put(data)
-            sleep(0.5)
-            continue
+        model_norm  = model.split("models/")[-1]
+        signal_norm = signal.split("signals/")[-1]
 
-        print(f"[WORKER] CPU={cpu_percent:.1f}% (lim={cpu_limit}%) | "
-              f"RAM={mem_percent:.1f}% (lim={mem_limit}%)")
+        registros = [
+            item for item in historico
+            if os.path.basename(item["model"]) == model_norm
+            and os.path.basename(item["signal"]) == signal_norm + '.csv'
+        ]
 
-        if cpu_percent > cpu_limit or mem_percent > mem_limit:
-            print(f"[WORKER] Recursos altos — requeue >> {username} idx={idx}")
+        username = payload.get("username", "?")
+        idx = payload.get("idx", -1)
 
-            retry = data.get("retry", 0)
-            retry = min(retry + 1, 5)
-            data["retry"] = retry
-            data["next_try"] = time() + retry  # backoff
+        if registros:
+            reg = max(registros, key=lambda x: x["time"])
+            cpu_requerida_pct = reg["cpu_used"] / psutil.cpu_count(logical=True)
+            mem_requerida_pct = (reg["mem_used_bytes"] / psutil.virtual_memory().total) * 100
+            tempo_estimado = reg["time"]
+        else:
+            cpu_requerida_pct = 0.01
+            mem_requerida_pct = 0.01
+            tempo_estimado = 0.1
 
-            print(f"[WORKER]: tempo de espera ")
+        print( f"[WORKER] CPU_atual={cpu_percent:.1f}% | RAM_atual={mem_percent:.1f}% " 
+              f"| Nec -> CPU={cpu_requerida_pct:.1f}% RAM={mem_requerida_pct:.1f}% " 
+              f"| Lim -> CPU={cpu_limit}% RAM={mem_limit}%" )
 
-            request_queue.put(data)
-            continue
+        if (cpu_percent + cpu_requerida_pct > cpu_limit or
+            mem_percent + mem_requerida_pct > mem_limit):
 
-        print(f"[WORKER] Processando >> {username} idx={idx}")
-        process_job(data)
+            print(f"[WORKER] 🚫 Recursos insuficientes — Requeue → {username} idx={idx}")
 
-        # reset do retry para próximos jobs sucessivos
-        data["retry"] = 0
+            # reenqueue
+            request_queue.put({"payload": payload, "client": client})
+            sleep(min(tempo_estimado, 1))
+            return  # encerra esta thread
 
-def process_job(data):
+        # (4) executa
+        print(f"[WORKER] ▶ Processando → {username} idx={idx}")
+        process_job(payload, client)
+
+
+def process_job(data, client):
     username = data["username"]
     algorithm = data["algorithm"]
     model = data["model"]
     signal = data["signal"]
     idx = data["idx"]
-    client = data["client"]
 
     start_time = time()
     start_dt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -379,117 +416,19 @@ def handle_client(client, addr, request_queue):
             elif data.startswith(b'2_'):
                 parts = data.decode().split('|', 2)
                 username = parts[1]
-                json_bytes = parts[2].encode()
+                json_str = parts[2]     
                 
-                data_list = json.loads(json_bytes)
+                payload = json.loads(json_str)  # <-- agora funciona
 
-                for idx, item in enumerate(data_list):
-                    cpu_limit = get_dynamic_cpu_limit()
-                    mem_limit = get_dynamic_mem_limit()
-                    cpu_percent = psutil.cpu_percent(interval=0.5)
-                    mem_percent = psutil.virtual_memory().percent
-
-                    print(f"username:: {username}    CPU agora = {cpu_percent:.1f}% (limite={cpu_limit}%)  |  "
-                    f"RAM agora = {mem_percent:.1f}% (limite={mem_limit}%)")
-
-
-                    if cpu_percent > cpu_limit or mem_percent > mem_limit:
-                        print('PAUSA::: ', username, 'idx:: ', idx)
-                        algorithm = item['algorithm']
-                        model = item['model']
-                        signal = item['signal']
-
-                        data = {
-                            "algorithm": algorithm,
-                            "model": model,
-                            "signal": signal,
-                            "username": username,
-                            "idx": idx,
-                            "client": client
-                        }
-
-                        request_queue.put(data)
-                        continue  
-                    else:
-                        algorithm = item['algorithm']
-            
-                        model = item['model']
-                    
-                        signal = item['signal']
-            
-                        start_time = time()
-                        start_dt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-                        H_matrix = np.loadtxt(model, delimiter=',', dtype=np.float32)
-                        signal_path = os.path.join("..", signal + ".csv")
-                        g_vector = np.loadtxt(signal_path, delimiter=",", dtype=np.float32)
-
-                        g_processed = apply_signal_gain(g_vector)
-
-                        tol_requisito = 1e-4
-
-                        if algorithm.upper() == 'CGNR':
-                            f, iters, final_error = reconstruct_cgnr(H_matrix, g_processed, 5, tol=tol_requisito)
-                        elif algorithm.upper() == 'CGNE':
-                            f, iters, final_error = reconstruct_cgne(H_matrix, g_processed, 5, tol=tol_requisito)
-
-                        f = f.flatten()
-                        f_min, f_max = f.min(), f.max()
-
-                        if f_max != f_min:
-                            f_norm = (f - f_min) / (f_max - f_min) * 255
-                        else:
-                            f_norm = np.full_like(f, 128)
-
-                        lado = int(np.sqrt(len(f_norm)))
-                        imagem_array = f_norm[:lado*lado].reshape((lado, lado), order='F')
-                        imagem_array = np.clip(imagem_array, 0, 255)
-                        imagem = Image.fromarray(imagem_array.astype('uint8'))
-
-                        img_bytes = io.BytesIO()
-                        imagem.save(img_bytes, format='PNG')
-                        img_bytes.seek(0)
-                        bytes_img = img_bytes.getvalue()
-
-                        end_time = time()
-                        end_dt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-                        del H_matrix, g_vector, g_processed, f, f_norm, imagem_array, imagem
-                        gc.collect()
-
-                        
-                        img_b64 = base64.b64encode(bytes_img).decode()
+                request_queue.put({"payload": payload, "client": client})
                 
-                        data_info = {
-                            "username": username,
-                            "index": idx,
-                            "algorithm": algorithm,
-                            "model": model,
-                            "signal": signal,
-                            "start_dt": start_dt,
-                            "end_dt": end_dt,
-                            "size": f"{len(img_b64)}",
-                            "iters": iters,
-                            "time": end_time - start_time,
-                        }
-
-                    
-                        mensagem = {
-                            "type": "2_",
-                            "payload": {
-                                "header": data_info,   # CORREÇÃO: enviar o header certo
-                                "image": img_b64
-                            }
-                        }
-
-                        with send_lock:
-                            client.send((json.dumps(mensagem) + "\n").encode())
-
         except ConnectionResetError:
             print(f"[DESCONECTADO] {addr} encerrou a conexão.")
             break
 
     client.close()
+
+request_queue = Queue()
 
 def main():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -502,7 +441,6 @@ def main():
         return
 
 
-    request_queue = Queue()
     close_profiler_worker = Value(c_bool)
 
     reports = Relatorio()
@@ -510,10 +448,10 @@ def main():
 
     profiler_worker = Thread(target=get_percent_virtual_memory, args=[close_profiler_worker, server_data])
     profiler_worker.start()
-
     
-    queue_worker = Thread(target=run_queue_worker, args=[ request_queue])
-    queue_worker.start()
+    supervisor = Thread(target=run_queue_worker, args=(request_queue,))
+    supervisor.daemon = True
+    supervisor.start()
 
     while True:
         client, addr = server.accept()

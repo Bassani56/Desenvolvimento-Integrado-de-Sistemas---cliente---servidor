@@ -1,7 +1,7 @@
 import threading
 import socket
 import hashlib
-import time
+from time import sleep
 import os
 import math
 import csv
@@ -20,8 +20,9 @@ send_lock = Lock()
 print_lock = Lock()     
 
 base = os.path.dirname(os.path.abspath(__file__))
-path_json = r"C:\Users\User\Desktop\Desenvolvimento Integrado\cliente-servidor\server\sorteio.json"
+print('base: ', base)
 
+path_json = f"{base}/sorteio.json"
 
 ACTUAL_DIR = Path(os.path.dirname(os.path.abspath(sys.argv[0])))
 
@@ -36,49 +37,13 @@ def imprimir_opcoes():
     print('2 - Recostruir imagems')
     print('4 - Sair')
 
-def sorteio():
-    # with open(path_json, "r") as f:
-    #     data = json.load(f)
-
-    # if "algorithm" not in data:
-    #     data["algorithm"] = []
-    # if "model" not in data:
-    #     data["model"] = []
-    # if "signal" not in data:
-    #     data["signal"] = []
-
-
-    algorithm = random.choice(["cgne","cgnr"])
-    model_size = random.choice(["30x30","60x60"])
-
-    if model_size == "30x30":
-        model = random.choice(MODELOS30)    # caminho real do servidor
-        signal = random.choice(SINAIS30)    # caminho real do cliente
-    else:
-        model = random.choice(MODELOS60)
-        signal = random.choice(SINAIS60)
-
-    print('sorteio:: ', signal, algorithm, model, '\n')
-
-    # data["algorithm"].append(algorithm)
-    # data["model"].append(model)
-    # data["signal"].append(signal)
-
-    # # Salvar tudo
-    # with open(path_json, "w") as f:
-    #     json.dump(data, f, indent=4)
-
-    # Retornar só os valores gerados nesta chamada
-    return signal, algorithm, model
-
-
 class serverData:
     def __init__(self):
         self.g = None
         self.algorithm = None
         self.model = None
 
-def sendMessages(client, username, stop_event):
+def sendMessages(client, username, stop_event, number):
     # connected = True
     while not stop_event.is_set():
         try:
@@ -92,26 +57,40 @@ def sendMessages(client, username, stop_event):
                 break
 
             elif msg == 2:
-                rand_request = random.randint(3, 7)
+                with open(path_json, 'r') as f:
+                    dados = json.load(f)
 
-                data_set = []
+                # GARANTE que number é inteiro
+                number_int = int(number)
+
+                batch = dados[number_int]
+                rand_request = batch["rand_request"]
 
                 for i in range(rand_request):
                     print(f"executando a {i + 1}° requisição, no total de {rand_request}")
 
-                    g, algorithm, model = sorteio()
-                    
-                    data = {'algorithm': algorithm, 'model': model, 'signal': g}
+                    g = batch['signal'][i]
+                    algorithm = batch['algorithm'][i]
+                    model = batch['model'][i]
 
-                    data_set.append(data)
-                    print(f"[{i+1}/{rand_request}] (batch) Usuário: {username} | Modelo: {model} | Sinal: {g} | Algoritmo: {algorithm}")
+                    payload = {
+                        'algorithm': algorithm,
+                        'model': model,
+                        'signal': g,
+                        'username': username,
+                        'idx': i
+                    }
 
+                    json_str = json.dumps(payload)
 
-                # envia_requisicao(client, username, data)
-                json_str = json.dumps(data_set)
+                    client.send(f'2_|{username}|{json_str}'.encode())
 
-                # envia mensagem inicial com username
-                client.send(f'2_|{username}|{json_str}'.encode())
+                    print(
+                        f"[{i+1}/{rand_request}] (batch) Usuário: {username} | "
+                        f"Modelo: {model} | Sinal: {g} | Algoritmo: {algorithm}"
+                    )
+
+                    sleep(random.uniform(0.5, 2.0))
 
 
         except Exception as e:
@@ -157,7 +136,7 @@ def receiveMessages(client, stop_event):
                     with open(path, "wb") as f:
                         f.write(img_bytes)
 
-                path = r'C:\Users\User\Desktop\Desenvolvimento Integrado\cliente-servidor\server\relatorio\imagens-relatorio_1764250066.8843918.csv'
+                path = r'C:\Users\User\Desktop\Desenvolvimento Integrado\cliente-servidor\server\relatorio\imagens-relatorio.csv'
                 time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 linha = (
                     f"{time_now} | "
@@ -190,13 +169,14 @@ def main():
     print('\nConectado\n')
 
     username = input('Usuário> ')
+    number = int(input('number (0 a 2)> '))
     create_paste(username)
     stop_event = threading.Event()
 
     recv_thread = threading.Thread(target=receiveMessages, args=(client, stop_event))
     recv_thread.start()
 
-    send_thread = threading.Thread(target=sendMessages, args=[client, username, stop_event])
+    send_thread = threading.Thread(target=sendMessages, args=[client, username, stop_event, number])
     send_thread.start()
 
 
