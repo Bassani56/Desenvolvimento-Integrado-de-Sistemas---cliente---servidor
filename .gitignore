@@ -1,5 +1,2 @@
-# Ignorar tudo dentro da pasta signals
-client/signals/
-
-# Ignorar tudo dentro da pasta models
-server/models/
+client/signals/*
+server/models/*
