@@ -1,2 +1,4 @@
 client/signals/*
 server/models/*
+
+server/relatorio/*
