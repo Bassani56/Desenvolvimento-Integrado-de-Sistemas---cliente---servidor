@@ -224,13 +224,13 @@ def get_dynamic_mem_limit():
     # max_percent = 100.0 - (1.0 / total_gb) * 100.0
     # max_percent = 100 - (1/16) * 100 = 93.75%
 
-    return min(42.0, 44.0)
+    return 85
     
 def get_dynamic_cpu_limit():
     # Limite: 80% dos núcleos lógicos
     n_cores = psutil.cpu_count(logical=True)
     # return max(50.0, min(90.0, n_cores * 80.0 / n_cores))  # 80% (ajustável)
-    return 50
+    return 85
 def get_percent_virtual_memory(close_profiler_worker, server_data):
     while not close_profiler_worker.value:
         start_dt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')

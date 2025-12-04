@@ -99,9 +99,14 @@ def sendMessages(client, username, stop_event, number):
             break
 
 def create_paste(username):
-    path = ACTUAL_DIR / "users" / username    
-    if not path.exists():
-        os.mkdir(path)
+    # Cria o diretório users se não existir, e depois o diretório do usuário
+    users_dir = ACTUAL_DIR / "users"
+    if not users_dir.exists():
+        os.makedirs(users_dir, exist_ok=True)
+    
+    user_dir = users_dir / username
+    if not user_dir.exists():
+        os.makedirs(user_dir, exist_ok=True)
 
 def receiveMessages(client, stop_event):
     while not stop_event.is_set():
@@ -130,13 +135,17 @@ def receiveMessages(client, stop_event):
 
                 # salvar imagem
                 name = f"{header['username']}_{header['algorithm']}_{header['start_dt'].replace(':','-')}_{header['end_dt'].replace(':','-')}_{header['size']}_{header['iters']}.png"
-                path = f"users/{header['username']}/{name}"
+                # Usa o mesmo ACTUAL_DIR para garantir consistência
+                path = ACTUAL_DIR / "users" / header['username'] / name
+                
+                # Garante que o diretório existe (caso não tenha sido criado antes)
+                path.parent.mkdir(parents=True, exist_ok=True)
                 
                 with file_lock:
                     with open(path, "wb") as f:
                         f.write(img_bytes)
 
-                path = r'C:\Users\User\Desktop\Desenvolvimento Integrado\cliente-servidor\server\relatorio\imagens-relatorio.csv'
+                path = r'C:\Users\lzpas\OneDrive\Desktop\Teste\Desenvolvimento-Integrado-de-Sistemas---cliente---servidor\server\relatorio\imagens-relatorio.csv'
                 time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 linha = (
                     f"{time_now} | "
