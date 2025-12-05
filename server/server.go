@@ -138,7 +138,7 @@ func initPerformanceCSV() {
 	performanceCSVWriter = csv.NewWriter(performanceCSV)
 
 	// Escreve cabeçalho
-	performanceCSVWriter.Write([]string{"Measured at   ", "CPU usage   ", "Memory usage"})
+	performanceCSVWriter.Write([]string{"Measured at   ", "CPU usage   ", "Memory usage", "Server"})
 	performanceCSVWriter.Flush()
 
 	log.Printf("[INFO] CSV de performance criado: %s", csvPath)
@@ -156,7 +156,7 @@ func writePerformanceLog(timestamp string, cpuPercent, memPercent float64) {
 	cpuStr := fmt.Sprintf("    %.1f%%", cpuPercent)
 	memStr := fmt.Sprintf("    %.1f%%", memPercent)
 
-	performanceCSVWriter.Write([]string{timestamp, cpuStr, memStr})
+	performanceCSVWriter.Write([]string{timestamp, cpuStr, memStr, "Go"})
 	performanceCSVWriter.Flush()
 }
 

@@ -202,7 +202,7 @@ class Relatorio:
         self.performance = CSV(ACTUAL_DIR / "relatorio" / f"performance-relatorio_{curr_time}.csv")
 
         self.images.write(["Username   ", "Image name   ", "Algorithm   ", "Model type   ", "Iterations   ", "Reconstruction time   "])
-        self.performance.write(["Measured at   ", "CPU usage   ", "Memory usage"])
+        self.performance.write(["Measured at   ", "CPU usage   ", "Memory usage", "Server"])
 
 class ServerData:
     def __init__(self, reports, models):
@@ -240,7 +240,7 @@ def get_percent_virtual_memory(close_profiler_worker, server_data):
         mem = psutil.virtual_memory()
         mem_percent = mem.percent
        
-        server_data.reports.performance.write([start_dt, f"    {cpu_percent}%", f"    {mem_percent} %"])
+        server_data.reports.performance.write([start_dt, f"    {cpu_percent}%", f"    {mem_percent} %", "Python"])
         server_data.reports.performance.flush()
 
         sleep(0.5)
